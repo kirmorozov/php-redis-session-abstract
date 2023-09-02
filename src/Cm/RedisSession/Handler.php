@@ -312,14 +312,14 @@ class Handler implements \SessionHandlerInterface
                         } catch (\CredisException $e) {
                             // Prevent throwing exception if Sentinel has no password set (error messages are different between redis 5 and redis 6)
                             if ($e->getCode() !== 0 || (
-                                strpos($e->getMessage(), 'ERR Client sent AUTH, but no password is set') === false && 
+                                strpos($e->getMessage(), 'ERR Client sent AUTH, but no password is set') === false &&
                                 strpos($e->getMessage(), 'ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?') === false)
                             ) {
                                 throw $e;
                             }
                         }
                     }
-                   
+
                     $sentinel = new \Credis_Sentinel($sentinelClient);
                     $sentinel
                         ->setClientTimeout($timeout)
@@ -795,6 +795,47 @@ class Handler implements \SessionHandlerInterface
         return $this->_lifeTime;
     }
 
+    protected function array_map_recursive($data, callable $callback1 = null, callable $callback2 = null) {
+        $ob = $this;
+        return array_map(function ($res) use ($ob, $callback1, $callback2) {
+            if (is_callable($callback1)) $res = $callback1($res);
+            if (is_array($res)) {
+                $res = $ob->array_map_recursive($res, $callback1, $callback2);
+            }
+            if (is_callable($callback2)) $res = $callback2($res);
+            return $res;
+        }, $data);
+    }
+    protected function remapObjectForJSON ($data) {
+
+        $callback = function ($item) {
+            if (is_object($item) && method_exists($item, '__serialize')) {
+                return [
+                    '__class__' => get_class($item),
+                    'data' => $item->__serialize()
+                ];
+            }
+            return $item;
+        };
+
+        return $this->array_map_recursive($data, $callback);
+    }
+
+    protected function remapObjectfromJSON ($data) {
+        $callback = function ($item) {
+            if (is_array($item) && isset($item['__class__']) && isset($item['data'])) {
+                $classname = $item['__class__'];
+                if (class_exists($classname) && method_exists($classname, '__unserialize')) {
+                    $res = new $classname();
+                    $res->__unserialize($item['data']);
+                    return $res;
+                }
+            }
+            return $item;
+        };
+        return $this->array_map_recursive($data, null, $callback);
+    }
+
     /**
      * Encode data
      *
@@ -803,6 +844,12 @@ class Handler implements \SessionHandlerInterface
      */
     protected function _encodeData($data)
     {
+        if (ini_get("session.serialize_handler") == 'php_serialize') {
+            $data = unserialize($data);
+            $data = $this->remapObjectForJSON($data);
+            $data = json_encode($data);
+        }
+
         $originalDataSize = strlen($data);
         if ($this->_compressionThreshold > 0 && $this->_compressionLibrary != 'none' && $originalDataSize >= $this->_compressionThreshold) {
             $this->_log(sprintf("Compressing %s bytes with %s", $originalDataSize,$this->_compressionLibrary));
@@ -848,6 +895,14 @@ class Handler implements \SessionHandlerInterface
             case ':l4:': $data = lz4_uncompress(substr($data,4)); break;
             case ':gz:': $data = gzuncompress(substr($data,4)); break;
         }
+
+        if (ini_get("session.serialize_handler") == 'php_serialize') {
+            $data = json_decode($data, true);
+            // messages correction
+            $data = $this->remapObjectfromJSON($data);
+            $data = serialize($data);
+        }
+
         return $data;
     }
 
